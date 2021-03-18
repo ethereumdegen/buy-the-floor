@@ -3,14 +3,12 @@ pragma solidity ^0.5.0;
 
 /**
 
-Work in Progress
+Buy The Floor 
 
-A decentralized exchange marketplace contract ERC721 tokens.
+An NFT exchange that allows buyers to specify a bid for 'any' of a type of NFT (any mooncat, any cryptopunk, etc)
 
-Need to:
-1) allow deposit of ERC721 token with safeTransferFrom
-2) allow for on-chain 'bids' and 'asks' orders (making) against any ERC20 [token type and amt]
-3) allow for on-chain taking of said orders
+Owners of those NFTs can then sell into those bids 
+
 */
 
  
@@ -361,91 +359,240 @@ library SafeMath {
 
 
 
-contract OpenNFTExchange is ERC721TokenReceiver  {
+// ----------------------------------------------------------------------------
 
- using SafeMath for uint;
+// Owned contract
 
-  mapping (address => mapping (uint => address)) public nftEscrow;  
- 
-  mapping (address => mapping (address => uint)) public currencyEscrow; //erc20 balances for bids 
- 
+// ----------------------------------------------------------------------------
 
-  //mapping (address => mapping (bytes32 => bool)) public orders; //mapping of user accounts to mapping of order hashes to booleans (true = submitted by user, equivalent to offchain signature)
-  //mapping (address => mapping (bytes32 => uint)) public orderFills; //mapping of user accounts to mapping of order hashes to uints (amount of order that has been filled)
+contract Owned {
 
-  event Order(address tokenGet, uint amountGet, address tokenGive, uint amountGive, uint expires, uint nonce, address user);
-  event Cancel(address tokenGet, uint amountGet, address tokenGive, uint amountGive, uint expires, uint nonce, address user, uint8 v, bytes32 r, bytes32 s);
-  event Trade(address tokenGet, uint amountGet, address tokenGive, uint amountGive, address get, address give);
-  event Deposit(address token, address user, uint amount, uint balance);
-  event Withdraw(address token, address user, uint amount, uint balance);
+    address public owner;
 
-   constructor() public {
+    address public newOwner;
 
+
+    event OwnershipTransferred(address indexed _from, address indexed _to);
+
+
+    constructor() public {
+
+        owner = msg.sender;
+
+    }
+
+
+    modifier onlyOwner {
+
+        require(msg.sender == owner);
+
+        _;
+
+    }
+
+
+    function transferOwnership(address _newOwner) public onlyOwner {
+
+        newOwner = _newOwner;
+
+    }
+
+    function acceptOwnership() public {
+
+        require(msg.sender == newOwner);
+
+        emit OwnershipTransferred(owner, newOwner);
+
+        owner = newOwner;
+
+        newOwner = address(0);
+
+    }
+
+}
+
+
+
+
+contract ECRecovery {
+
+  /**
+   * @dev Recover signer address from a message by using their signature
+   * @param hash bytes32 message, the hash is the signed message. What is recovered is the signer address.
+   * @param sig bytes signature, the signature is generated using web3.eth.sign()
+   */
+  function recover(bytes32 hash, bytes memory sig) internal  pure returns (address) {
+    bytes32 r;
+    bytes32 s;
+    uint8 v;
+
+    //Check the signature length
+    if (sig.length != 65) {
+      return (address(0));
+    }
+
+    // Divide the signature in r, s and v variables
+    assembly {
+      r := mload(add(sig, 32))
+      s := mload(add(sig, 64))
+      v := byte(0, mload(add(sig, 96)))
+    }
+
+    // Version of signature should be 27 or 28, but 0 and 1 are also possible versions
+    if (v < 27) {
+      v += 27;
+    }
+
+    // If the version is correct return the signer address
+    if (v != 27 && v != 28) {
+      return (address(0));
+    } else {
+      return ecrecover(hash, v, r, s);
+    }
   }
 
-  function onERC721Received(address _operator, address _from, uint256 _tokenId, bytes calldata _data) external returns(bytes4)
-  {
-    return bytes4(keccak256("onERC721Received(address,address,uint256,bytes)"));
+}
+
+
+/*
+ERC20 tokens must be approved to this contract ! 
+Then, the buyer will perform an offchain metatx personalsign for their bid 
+
+NFT must also be approved to this contract - setApprovalForAll
+*/
+
+contract BuyTheFloorExchange is Owned, ECRecovery  {
+
+  using SafeMath for uint;
+
+    
+  mapping (bytes32 => uint) public burnedSignatures; 
+    
+  uint256 public _fee_pct;
+  uint256 public _chain_id;
+ 
+  constructor( uint chainId, uint fee_pct) public { 
+    require(fee_pct >= 0 && fee_pct <100);
+
+    _fee_pct = fee_pct;
+    _chain_id = chainId;
   }
+
 
   //Do not allow ETH to enter
    function() external payable {
     revert();
   }
-
-  //require pre-approval 
-  function depositNFT(address contractAddress, uint256 tokenId, address from) public returns (bool){
-      ERC712(contractAddress).safeTransferFrom(from, address(this), tokenId);
-
-      nftEscrow[contractAddress][tokenId] = from;
-
+  
+  
+  
+  struct BidPacket {
+    address bidderAddress;
+    address nftContractAddress;
+    address currencyTokenAddress;
+    uint256 currencyTokenAmount;
+    uint256 expires;
   }
   
   
-  function withdrawNFT(address contractAddress, uint256 tokenId, address to) public returns (bool){
-      address nftOwner = nftEscrow[contractAddress][tokenId];
-      require(nftOwner == to);
+     bytes32 constant EIP712DOMAIN_TYPEHASH = keccak256(
+          "EIP712Domain(string contractName,string version,uint256 chainId,address verifyingContract)"
+      );
 
-       ERC712(contractAddress).safeTransferFrom(address(this), to, tokenId);
-
-       nftEscrow[contractAddress][tokenId] = address(0x0);
-  }
-  
-  //buyer places a bid on an NFT .   Able to override a previous bid if higher 
-  //move erc20 tokens into escrow in this contract during OfferBid 
-   function offerBid(address contractAddress, uint256 tokenId, address currencyToken, uint currencyAmount) public returns (bool){
-      IERC20(currencyToken).transferFrom( msg.sender, address(this), currencyAmount );
-      currencyEscrow[currencyToken][msg.sender] = currencyEscrow[currencyToken][msg.sender].add(currencyAmount);
-
-      
-  }
-
-   function acceptBid(address contractAddress, uint256 tokenId, address currencyToken, uint currencyAmount) public returns (bool){
-      address nftOwner = nftEscrow[contractAddress][tokenId];
-      require(nftOwner == msg.sender);
-
-      
-
-  }
-  
-  
-   //seller offers an NFT for sale 
-   function offerSale(address contractAddress, uint256 tokenId, address currencyToken, uint currencyAmount) public returns (bool){
-      address nftOwner = nftEscrow[contractAddress][tokenId];
-      require(nftOwner == msg.sender);
-
+   function getBidDomainTypehash() public pure returns (bytes32) {
+      return EIP712DOMAIN_TYPEHASH;
    }
 
-  //sends back the tokens in escrow for this bid 
-   function cancelBid(address contractAddress, uint256 tokenId){
+   function getEIP712DomainHash(string memory contractName, string memory version, uint256 chainId, address verifyingContract) public pure returns (bytes32) {
 
-   }
+      return keccak256(abi.encode(
+            EIP712DOMAIN_TYPEHASH,
+            keccak256(bytes(contractName)),
+            keccak256(bytes(version)),
+            chainId,
+            verifyingContract
+        ));
+    }
 
-    //requires preapproval of tokens to this contract  
-   function acceptSale(address contractAddress, uint256 tokenId, address currencyToken, uint currencyAmount) public returns (bool){
-      
+
+  bytes32 constant BIDPACKET_TYPEHASH = keccak256(
+      "BidPacket(address bidderAddress,address nftContractAddress,address currencyTokenAddress,uint256 currencyTokenAmount,uint256 expires)"
+  );
+
+
+
+    function getBidPacketTypehash()  public pure returns (bytes32) {
+      return BIDPACKET_TYPEHASH;
   }
   
+  function getBidPacketHash(address bidderAddress,address nftContractAddress,address currencyTokenAddress, uint256 currencyTokenAmount,uint256 expires) public pure returns (bytes32) {
+          return keccak256(abi.encode(
+              BIDPACKET_TYPEHASH,
+              bidderAddress,
+              nftContractAddress,
+              currencyTokenAddress,
+              currencyTokenAmount,
+              expires
+          ));
+      }
+
+  function getBidTypedDataHash(address bidderAddress,address nftContractAddress,address currencyTokenAddress, uint256 currencyTokenAmount,uint256 expires) public view returns (bytes32) {
+
+
+              // Note: we need to use `encodePacked` here instead of `encode`.
+              bytes32 digest = keccak256(abi.encodePacked(
+                  "\x19\x01",
+                  getEIP712DomainHash('BuyTheFloor','1',_chain_id,address(this)),
+                  getBidPacketHash(bidderAddress,nftContractAddress,currencyTokenAddress,currencyTokenAmount,expires)
+              ));
+              return digest;
+          }
+  
+
+  //require pre-approval from the buyer in the form of a personal sign 
+  function sellNFT(address nftContractAddress, uint256 tokenId, address from, address to, address currencyToken, uint256 currencyAmount, uint256 expires, bytes memory buyerSignature) public returns (bool){
+      
+      //require personalsign from buyer to be submitted by seller  
+       bytes32 sigHash = getBidTypedDataHash(to,nftContractAddress,currencyToken,currencyAmount,expires);
+
+       address recoveredSignatureSigner = recover(sigHash,buyerSignature);
+
+
+      //make sure the signer is the depositor of the tokens
+       require(to == recoveredSignatureSigner, 'Invalid signature');
+       require(from == msg.sender, 'Not NFT Owner');
+      
+      
+      require(block.number < expires || expires == 0, 'bid expired');
+     
+      require(burnedSignatures[sigHash] == 0, 'signature already used');
+      burnedSignatures[sigHash] = 0x1;
+      
+      
+      ERC721(nftContractAddress).safeTransferFrom(from, to, tokenId);
+      
+      uint256 feeAmount = currencyAmount.mul(_fee_pct).div(100);
+
+      IERC20(currencyToken).transferFrom(to, from, currencyAmount.sub(feeAmount) );
+      IERC20(currencyToken).transferFrom(to, owner, feeAmount );
+      
+     
+
+      return true;
+  }
+  
+   
+  function cancelBid(address nftContractAddress, address to, address currencyToken, uint256 currencyAmount, uint256 expires, bytes memory buyerSignature ) public returns (bool){
+      bytes32 sigHash = getBidTypedDataHash(to,nftContractAddress,currencyToken,currencyAmount,expires);
+      address recoveredSignatureSigner = recover(sigHash,buyerSignature);
+      
+      require(to == recoveredSignatureSigner, 'Invalid signature');
+      require(msg.sender == recoveredSignatureSigner, 'Not bid owner');
+      
+      burnedSignatures[sigHash] = 0x2;
+      
+      return true;
+  }
   
   
   
